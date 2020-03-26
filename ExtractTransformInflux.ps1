@@ -27,6 +27,15 @@ param (
     #List of tags and their values to replace with. Usage Pattern: <Tag=Value>. Separate multiple tags by a ;. e.g. "AppName=MyApplication;Release=Pre_Beta". Mandatory if -oldTags is specified. 
     [string] $newTags,
 
+    #Name of tag to base mappings on.
+    [string] $addTagBasedOn,
+
+    #Name of new tag to add.
+    [string] $addedTagName,
+
+    #Mapping of added tag values. Usage Pattern: <baseTagValue=addedTagValue>. Separate multiple tags by a ;. e.g. "MyWebApplication=Web;MyDBApplication=DB".
+    [string] $addedTagMappings,
+
     #Filters to restrict the points/series returned. Optional, but recommended 
     [string] $additionalFilter,
     
@@ -54,10 +63,14 @@ begin{
     $pwd = split-path -parent $MyInvocation.MyCommand.Definition
 
     if(([string]::IsNullOrEmpty($oldTags) -and -not [string]::IsNullOrEmpty($newTags)) -or (-not [string]::IsNullOrEmpty($oldTags) -and [string]::IsNullOrEmpty($newTags))){
-        throw "If 'oldTags' is specified then you new need to specify 'newTags' as well (and visa versa).!!"
+        throw "If 'oldTags' is specified then you need to specify 'newTags' as well (and visa versa)!"
         exit
     }
  
+    if(([string]::IsNullOrEmpty($addTagBasedOn) -and -not [string]::IsNullOrEmpty($addedTagName)) -or (-not [string]::IsNullOrEmpty($addTagBasedOn) -and [string]::IsNullOrEmpty($addedTagName))){
+        throw "If 'addTagBasedOn' is specified then you need to specify 'addedTagName' as well (and visa versa)!"
+        exit
+    }
    
     if(!$oldTags.EndsWith(";")) { $oldTags = $oldTags + ";" }
     $oldTagSet = New-Object Collections.Generic.List[PSCustomObject]
@@ -68,6 +81,11 @@ begin{
     $newTagSet = New-Object Collections.Generic.List[PSCustomObject]
     $index = 0
     $([regex] "(?<tag>.*?)=(?<value>.*?);").Matches($newTags) |  ForEach-Object {$newTagSet.Add([PSCustomObject]@{Index=$index++; Tag = $_.groups["tag"].Value ; Value =  $_.groups["value"].Value })}
+
+    if(!$addedTagMappings.EndsWith(";")) { $addedTagMappings = $addedTagMappings + ";" }
+    $addedTagSet = @{}
+    $index = 0
+    $([regex] "(?<baseValue>.*?)=(?<mappedValue>.*?);").Matches($addedTagMappings) |  ForEach-Object {$addedTagSet.Add($_.groups["baseValue"].Value, $_.groups["mappedValue"].Value)}
 
     if($newTagSet.Count -ne $oldTagSet.Count){
         Write-Host "Number of Tags to replace do not match with new set of tags provided"
@@ -104,10 +122,27 @@ process{
         }
         $series = $influxData.results[0].series[0]
 
+        $missingBaseValues = @{}
+
         for ($row = 0; $row -lt $series.values.Count; $row++){
             $point = [ordered]@{}
             for ($col = 0; $col -lt $series.Columns.Count; $col++) {
                 $point.Add($series.Columns[$col], $series.Values[$row][$col])
+                if ($series.Columns[$col] -eq $addTagBasedOn) {
+                    $tagValue = $series.Values[$row][$col]
+                    $addedTagValue = $null
+
+                    if ($addedTagSet.ContainsKey($tagValue)) {
+                        $addedTagValue = $addedTagSet[$tagValue]
+                    } else {
+                        $addedTagValue = "<blank>" 
+                        if (!$missingBaseValues.Contains($tagValue)) {
+                            $missingBaseValues.Add($tagValue, $null)
+                        }   
+                    }
+
+                    $point.Add($addedTagName, $addedTagValue)
+                }
             }
             $points.Add([pscustomobject]$point)
         }
@@ -140,5 +175,9 @@ process{
     } until($row -lt $batchSize)
 }
 end{
+    if ($missingBaseValues.Count -gt 0) {
+        Write-Host "The following tag values could not be mapped:" -ForegroundColor Yellow
+        $missingBaseValues.Keys | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    }
     Write-Host "$([datetime]::now.tostring()) Done with process, extracted $recordsProcessed points"
 }
